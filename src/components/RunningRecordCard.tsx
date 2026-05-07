@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { formatMinutes, runningDurationMinutes } from "@/lib/time";
+import { displayDateTime, formatMinutes, getRecordStart, runningDurationMinutes } from "@/lib/time";
 import type { Category, TimeRecord } from "@/types/time";
 
 export function RunningRecordCard({
@@ -18,6 +18,7 @@ export function RunningRecordCard({
   const [now, setNow] = useState(() => new Date());
   const category = useMemo(() => categories.find((item) => item.id === record.categoryId), [categories, record.categoryId]);
   const minutes = runningDurationMinutes(record, now);
+  const startedAt = getRecordStart(record);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 30_000);
@@ -38,7 +39,7 @@ export function RunningRecordCard({
             </div>
             <span className="shrink-0 rounded-full bg-white/12 px-3 py-1 text-sm">{formatMinutes(minutes)}</span>
           </div>
-          <p className="mt-2 text-sm text-white/75">开始于 {record.startTime}</p>
+          <p className="mt-2 text-sm text-white/75">开始于 {startedAt ? displayDateTime(startedAt) : record.startTime}</p>
           {record.note ? <p className="mt-2 whitespace-pre-wrap text-sm text-white/90">{record.note}</p> : null}
         </div>
       </div>

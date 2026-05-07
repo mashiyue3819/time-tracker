@@ -1,4 +1,4 @@
-import { recordDuration } from "@/lib/time";
+import { splitRecordByLogicalDays } from "@/lib/time";
 import type { Category, TimeRecord } from "@/types/time";
 
 export type CategoryStat = {
@@ -9,14 +9,20 @@ export type CategoryStat = {
   minutes: number;
 };
 
-export function aggregateByCategory(records: TimeRecord[], categories: Category[]) {
+export function aggregateByCategory(
+  records: TimeRecord[],
+  categories: Category[],
+  dayKeys: string[],
+  now = new Date(),
+) {
   const categoryMap = new Map(categories.map((category) => [category.id, category]));
   const minutesByCategory = new Map<string, number>();
 
   for (const record of records) {
-    if (record.isRunning || !record.endTime) continue;
-    const minutes = recordDuration(record);
-    minutesByCategory.set(record.categoryId, (minutesByCategory.get(record.categoryId) ?? 0) + minutes);
+    const segments = splitRecordByLogicalDays(record, dayKeys, undefined, now);
+    for (const segment of segments) {
+      minutesByCategory.set(record.categoryId, (minutesByCategory.get(record.categoryId) ?? 0) + segment.minutes);
+    }
   }
 
   return Array.from(minutesByCategory.entries())
@@ -24,7 +30,7 @@ export function aggregateByCategory(records: TimeRecord[], categories: Category[
       const category = categoryMap.get(categoryId);
       return {
         categoryId,
-        label: category?.name ?? "未知/已删除分类",
+        label: category?.name ?? "未知分类/已删除分类",
         emoji: category?.emoji ?? "？",
         color: category?.color ?? "#71717a",
         minutes,

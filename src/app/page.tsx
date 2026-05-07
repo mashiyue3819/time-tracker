@@ -6,21 +6,13 @@ import { QuickStartSheet } from "@/components/QuickStartSheet";
 import { RecordList } from "@/components/RecordList";
 import { RecordSheet } from "@/components/RecordSheet";
 import { RunningRecordCard } from "@/components/RunningRecordCard";
-import { addDays, createId, displayDate, nowTime, toDateKey, toTimeKey, todayKey } from "@/lib/time";
-import {
-  deleteRecord,
-  finishRunningRecord,
-  getCategories,
-  getRecordsByDate,
-  getRunningRecord,
-  saveRecord,
-  startRunningRecord,
-} from "@/lib/db";
-import type { Category, TimeRecord } from "@/types/time";
+import { addDays, createId, displayDate, getLogicalDayKey, getSegmentsForLogicalDay, toTimeKey, todayKey } from "@/lib/time";
+import { deleteRecord, finishRunningRecord, getAllRecords, getCategories, getRunningRecord, saveRecord, startRunningRecord } from "@/lib/db";
+import type { Category, TimeRecord, TimeRecordSegment } from "@/types/time";
 
 export default function TodayPage() {
   const [date, setDate] = useState(todayKey);
-  const [records, setRecords] = useState<TimeRecord[]>([]);
+  const [segments, setSegments] = useState<TimeRecordSegment[]>([]);
   const [runningRecord, setRunningRecord] = useState<TimeRecord | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [editingRecord, setEditingRecord] = useState<TimeRecord | null>(null);
@@ -30,14 +22,18 @@ export default function TodayPage() {
 
   const loadData = useCallback(async () => {
     setLoading(true);
-    const [nextCategories, nextRecords, nextRunningRecord] = await Promise.all([
-      getCategories(),
-      getRecordsByDate(date),
-      getRunningRecord(),
-    ]);
+    const now = new Date();
+    const [nextCategories, nextRecords, nextRunningRecord] = await Promise.all([getCategories(), getAllRecords(), getRunningRecord()]);
+    const selectedSegments = getSegmentsForLogicalDay(nextRecords, date, now);
+    const selectedIsCurrentLogicalDay = date === getLogicalDayKey(now);
+
     setCategories(nextCategories);
     setRunningRecord(nextRunningRecord);
-    setRecords(nextRecords.filter((record) => record.id !== nextRunningRecord?.id));
+    setSegments(
+      selectedSegments.filter((segment) => {
+        return !(selectedIsCurrentLogicalDay && nextRunningRecord && segment.record.id === nextRunningRecord.id);
+      }),
+    );
     setLoading(false);
   }, [date]);
 
@@ -64,12 +60,14 @@ export default function TodayPage() {
     const clickedAt = new Date();
     await startRunningRecord({
       id: createId("record"),
-      date: toDateKey(clickedAt),
-      startTime: toTimeKey(clickedAt),
-      endTime: null,
       categoryId,
       note,
       isRunning: true,
+      startedAt: clickedAt.toISOString(),
+      endedAt: null,
+      date: getLogicalDayKey(clickedAt),
+      startTime: toTimeKey(clickedAt),
+      endTime: null,
     });
     setQuickStartOpen(false);
     await loadData();
@@ -77,7 +75,7 @@ export default function TodayPage() {
 
   async function handleFinishRunning() {
     if (!runningRecord) return;
-    await finishRunningRecord(runningRecord.id, nowTime());
+    await finishRunningRecord(runningRecord.id, new Date().toISOString());
     await loadData();
   }
 
@@ -89,19 +87,19 @@ export default function TodayPage() {
             type="button"
             className="h-10 w-10 rounded-full bg-white text-xl shadow-sm"
             onClick={() => setDate((value) => addDays(value, -1))}
-            aria-label="前一天"
+            aria-label="前一个逻辑日"
           >
             ‹
           </button>
           <div className="text-center">
             <h1 className="text-2xl font-semibold tracking-normal">{title}</h1>
-            <p className="mt-0.5 text-sm text-slate-500">{date}</p>
+            <p className="mt-0.5 text-sm text-slate-500">{date} · 04:00 起算</p>
           </div>
           <button
             type="button"
             className="h-10 w-10 rounded-full bg-white text-xl shadow-sm"
             onClick={() => setDate((value) => addDays(value, 1))}
-            aria-label="后一天"
+            aria-label="后一个逻辑日"
           >
             ›
           </button>
@@ -138,7 +136,7 @@ export default function TodayPage() {
             )}
 
             <RecordList
-              records={records}
+              segments={segments}
               categories={categories}
               onEdit={(record) => {
                 setEditingRecord(record);
@@ -162,12 +160,7 @@ export default function TodayPage() {
         +
       </button>
 
-      <QuickStartSheet
-        open={quickStartOpen}
-        categories={categories}
-        onClose={() => setQuickStartOpen(false)}
-        onStart={handleQuickStart}
-      />
+      <QuickStartSheet open={quickStartOpen} categories={categories} onClose={() => setQuickStartOpen(false)} onStart={handleQuickStart} />
 
       <RecordSheet
         open={recordSheetOpen}

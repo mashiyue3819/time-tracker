@@ -2,12 +2,31 @@
 
 import { openDB, type DBSchema } from "idb";
 import { defaultCategories } from "@/lib/defaults";
+import {
+  getLogicalDayKey,
+  getRecordSegmentForLogicalDay,
+  makeLocalDateTime,
+  parseStoredDate,
+  toTimeKey,
+} from "@/lib/time";
 import type { Category, TimeRecord } from "@/types/time";
+
+type StoredRecord = Partial<TimeRecord> & {
+  id: string;
+  categoryId: string;
+  note?: string;
+  date?: string;
+  startTime?: string;
+  endTime?: string | null;
+  isRunning?: boolean;
+  startedAt?: string;
+  endedAt?: string | null;
+};
 
 interface TimeTrackerDB extends DBSchema {
   records: {
     key: string;
-    value: TimeRecord;
+    value: StoredRecord;
     indexes: {
       "by-date": string;
     };
@@ -36,12 +55,67 @@ async function getDb() {
   return dbPromise;
 }
 
-function normalizeRecord(record: TimeRecord): TimeRecord {
-  return {
-    ...record,
-    endTime: record.endTime ?? null,
-    isRunning: Boolean(record.isRunning && !record.endTime),
+function getLegacyStart(raw: StoredRecord) {
+  const dateKey = raw.date || getLogicalDayKey(new Date());
+  const timeKey = raw.startTime || "00:00";
+  return makeLocalDateTime(dateKey, timeKey) ?? new Date();
+}
+
+function getLegacyEnd(raw: StoredRecord, start: Date) {
+  if (!raw.endTime) return null;
+  let end = makeLocalDateTime(raw.date || getLogicalDayKey(start), raw.endTime);
+  if (!end) return null;
+
+  if (raw.startTime && raw.endTime < raw.startTime) {
+    end = new Date(end);
+    end.setDate(end.getDate() + 1);
+  }
+
+  return end;
+}
+
+function normalizeRecord(raw: StoredRecord): { record: TimeRecord; migrated: boolean } {
+  const parsedStart = parseStoredDate(raw.startedAt);
+  const start = parsedStart ?? getLegacyStart(raw);
+  const parsedEndedAt = raw.endedAt === null ? null : parseStoredDate(raw.endedAt);
+  const legacyEnd = raw.endedAt === undefined ? getLegacyEnd(raw, start) : null;
+  let end = parsedEndedAt ?? legacyEnd;
+
+  if (end && end < start) {
+    end = new Date(end);
+    end.setDate(end.getDate() + 1);
+  }
+
+  const record: TimeRecord = {
+    id: raw.id,
+    categoryId: raw.categoryId,
+    note: raw.note ?? "",
+    isRunning: Boolean(raw.isRunning && !end),
+    startedAt: start.toISOString(),
+    endedAt: end ? end.toISOString() : null,
+    date: getLogicalDayKey(start),
+    startTime: toTimeKey(start),
+    endTime: end ? toTimeKey(end) : null,
   };
+
+  const migrated =
+    raw.startedAt !== record.startedAt ||
+    (raw.endedAt ?? null) !== record.endedAt ||
+    raw.date !== record.date ||
+    raw.startTime !== record.startTime ||
+    (raw.endTime ?? null) !== record.endTime ||
+    raw.isRunning !== record.isRunning ||
+    raw.note !== record.note;
+
+  return { record, migrated };
+}
+
+async function writeMigratedRecords(records: TimeRecord[]) {
+  if (records.length === 0) return;
+  const db = await getDb();
+  const tx = db.transaction("records", "readwrite");
+  await Promise.all(records.map((record) => tx.store.put(record)));
+  await tx.done;
 }
 
 export async function ensureDefaultCategories() {
@@ -70,48 +144,101 @@ export async function deleteCategory(id: string) {
   await db.delete("categories", id);
 }
 
-export async function getRecordsByDate(date: string) {
+export async function getAllRecords() {
   const db = await getDb();
-  const records = await db.getAllFromIndex("records", "by-date", date);
-  return records.map(normalizeRecord).sort((a, b) => a.startTime.localeCompare(b.startTime));
+  const rawRecords = await db.getAll("records");
+  const normalized = rawRecords.map(normalizeRecord);
+  await writeMigratedRecords(normalized.filter((item) => item.migrated).map((item) => item.record));
+  return normalized.map((item) => item.record).sort((a, b) => a.startedAt.localeCompare(b.startedAt));
 }
 
-export async function getRecordsByDates(dates: string[]) {
-  const groups = await Promise.all(dates.map((date) => getRecordsByDate(date)));
-  return groups.flat();
+export async function getRecordsByDate(dayKey: string) {
+  const records = await getAllRecords();
+  const now = new Date();
+  return records.filter((record) => getRecordSegmentForLogicalDay(record, dayKey, undefined, now));
+}
+
+export async function getRecordsByDates(dayKeys: string[]) {
+  const records = await getAllRecords();
+  const now = new Date();
+  const dayKeySet = new Set(dayKeys);
+  return records.filter((record) => {
+    for (const dayKey of dayKeySet) {
+      if (getRecordSegmentForLogicalDay(record, dayKey, undefined, now)) return true;
+    }
+    return false;
+  });
 }
 
 export async function saveRecord(record: TimeRecord) {
   const db = await getDb();
-  await db.put("records", normalizeRecord(record));
+  const normalized = normalizeRecord(record).record;
+
+  if (normalized.isRunning) {
+    const records = await getAllRecords();
+    const tx = db.transaction("records", "readwrite");
+    await Promise.all(
+      records
+        .filter((item) => item.id !== normalized.id && item.isRunning)
+        .map((item) =>
+          tx.store.put({
+            ...item,
+            isRunning: false,
+            endedAt: normalized.startedAt,
+            endTime: toTimeKey(new Date(normalized.startedAt)),
+          }),
+        ),
+    );
+    await tx.store.put(normalized);
+    await tx.done;
+    return;
+  }
+
+  await db.put("records", normalized);
 }
 
 export async function getRunningRecord() {
-  const db = await getDb();
-  const records = await db.getAll("records");
-  return records.map(normalizeRecord).find((record) => record.isRunning) ?? null;
+  const records = await getAllRecords();
+  return records.find((record) => record.isRunning && !record.endedAt) ?? null;
 }
 
 export async function startRunningRecord(record: TimeRecord) {
   const db = await getDb();
-  const records = (await db.getAll("records")).map(normalizeRecord);
+  const normalized = normalizeRecord({ ...record, endedAt: null, endTime: null, isRunning: true }).record;
+  const records = await getAllRecords();
+  const startDate = new Date(normalized.startedAt);
   const tx = db.transaction("records", "readwrite");
 
-  for (const item of records) {
-    if (item.isRunning) {
-      await tx.store.put({ ...item, isRunning: false, endTime: item.endTime ?? item.startTime });
-    }
-  }
+  await Promise.all(
+    records
+      .filter((item) => item.isRunning)
+      .map((item) =>
+        tx.store.put({
+          ...item,
+          isRunning: false,
+          endedAt: normalized.startedAt,
+          endTime: toTimeKey(startDate),
+        }),
+      ),
+  );
 
-  await tx.store.put(normalizeRecord({ ...record, endTime: null, isRunning: true }));
+  await tx.store.put(normalized);
   await tx.done;
 }
 
-export async function finishRunningRecord(id: string, endTime: string) {
+export async function finishRunningRecord(id: string, endedAt: string) {
   const db = await getDb();
-  const record = await db.get("records", id);
-  if (!record) return;
-  await db.put("records", normalizeRecord({ ...record, endTime, isRunning: false }));
+  const rawRecord = await db.get("records", id);
+  if (!rawRecord) return;
+
+  const record = normalizeRecord(rawRecord).record;
+  const end = parseStoredDate(endedAt) ?? new Date();
+  await db.put("records", {
+    ...record,
+    endedAt: end.toISOString(),
+    endTime: toTimeKey(end),
+    isRunning: false,
+  });
 }
 
 export async function deleteRecord(id: string) {

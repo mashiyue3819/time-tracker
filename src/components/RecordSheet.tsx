@@ -1,7 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createId, nowTime } from "@/lib/time";
+import {
+  createId,
+  getLogicalDayKey,
+  getLogicalDayRange,
+  makeLocalDateTime,
+  parseDateTimeLocalValue,
+  parseStoredDate,
+  toDateTimeLocalValue,
+  toTimeKey,
+} from "@/lib/time";
 import type { Category, TimeRecord } from "@/types/time";
 
 export function RecordSheet({
@@ -19,41 +28,69 @@ export function RecordSheet({
   onClose: () => void;
   onSave: (record: TimeRecord) => void;
 }) {
-  const [startTime, setStartTime] = useState("09:00");
-  const [endTime, setEndTime] = useState("10:00");
+  const [startValue, setStartValue] = useState("");
+  const [endValue, setEndValue] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [note, setNote] = useState("");
 
   useEffect(() => {
     if (!open) return;
+
     if (record) {
-      setStartTime(record.startTime);
-      setEndTime(record.endTime ?? "");
+      const start = parseStoredDate(record.startedAt);
+      const end = parseStoredDate(record.endedAt);
+      setStartValue(start ? toDateTimeLocalValue(start) : "");
+      setEndValue(end ? toDateTimeLocalValue(end) : "");
       setCategoryId(record.categoryId);
       setNote(record.note);
       return;
     }
 
-    const current = nowTime();
-    setStartTime(current);
-    setEndTime(current);
+    const now = new Date();
+    const isCurrentLogicalDay = getLogicalDayKey(now) === date;
+    const start = isCurrentLogicalDay ? now : makeLocalDateTime(date, "09:00") ?? getLogicalDayRange(date)[0];
+    const end = new Date(start);
+    end.setHours(start.getHours() + 1);
+
+    setStartValue(toDateTimeLocalValue(start));
+    setEndValue(toDateTimeLocalValue(end));
     setCategoryId(categories[0]?.id ?? "");
     setNote("");
-  }, [categories, open, record]);
+  }, [categories, date, open, record]);
 
   if (!open) return null;
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const nextEndTime = endTime || null;
+
+    const start = parseDateTimeLocalValue(startValue);
+    if (!start) {
+      window.alert("开始时间无效，请重新选择。");
+      return;
+    }
+
+    let end = endValue ? parseDateTimeLocalValue(endValue) : null;
+    if (end && end <= start) {
+      const sameNaturalDay = startValue.slice(0, 10) === endValue.slice(0, 10);
+      if (sameNaturalDay) {
+        end = new Date(end);
+        end.setDate(end.getDate() + 1);
+      } else {
+        window.alert("结束时间不能早于开始时间。");
+        return;
+      }
+    }
+
     onSave({
       id: record?.id ?? createId("record"),
-      date: record?.date ?? date,
-      startTime,
-      endTime: nextEndTime,
       categoryId,
       note: note.trim(),
-      isRunning: nextEndTime ? false : Boolean(record?.isRunning),
+      isRunning: !end,
+      startedAt: start.toISOString(),
+      endedAt: end ? end.toISOString() : null,
+      date: getLogicalDayKey(start),
+      startTime: toTimeKey(start),
+      endTime: end ? toTimeKey(end) : null,
     });
   }
 
@@ -69,14 +106,25 @@ export function RecordSheet({
           </button>
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-3">
           <label className="block">
-            <span className="text-sm font-medium text-slate-600">开始</span>
-            <input className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-3" type="time" value={startTime} onChange={(event) => setStartTime(event.target.value)} required />
+            <span className="text-sm font-medium text-slate-600">开始时间</span>
+            <input
+              className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"
+              type="datetime-local"
+              value={startValue}
+              onChange={(event) => setStartValue(event.target.value)}
+              required
+            />
           </label>
           <label className="block">
-            <span className="text-sm font-medium text-slate-600">结束</span>
-            <input className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-3" type="time" value={endTime} onChange={(event) => setEndTime(event.target.value)} />
+            <span className="text-sm font-medium text-slate-600">结束时间</span>
+            <input
+              className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"
+              type="datetime-local"
+              value={endValue}
+              onChange={(event) => setEndValue(event.target.value)}
+            />
           </label>
         </div>
 
@@ -96,9 +144,7 @@ export function RecordSheet({
           <textarea className="mt-1 min-h-24 w-full resize-none rounded-lg border border-slate-200 bg-slate-50 px-3 py-3" value={note} onChange={(event) => setNote(event.target.value)} placeholder="可选" />
         </label>
 
-        {record?.isRunning ? (
-          <p className="mt-3 text-xs text-slate-500">如果填写结束时间，这条记录会自动从进行中变为已完成。</p>
-        ) : null}
+        <p className="mt-3 text-xs text-slate-500">清空结束时间会把这条记录设为进行中；保存时会自动保证同时只有一条进行中记录。</p>
 
         <button type="submit" className="mt-5 h-12 w-full rounded-lg bg-ink text-base font-semibold text-white disabled:opacity-40" disabled={!categoryId}>
           保存
